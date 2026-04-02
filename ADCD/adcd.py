@@ -50,7 +50,6 @@ class ADCD_Net(nn.Module):
         self.alpha = nn.Parameter(torch.zeros(1))
         self.beta = nn.Parameter(torch.zeros(1))
 
-        # 5. 预测网络
         self.prednet_input_len = self.k
         self.prednet_len1, self.prednet_len2 = 256, 128
         self.prednet_full1 = PosLinear(self.prednet_input_len, self.prednet_len1)

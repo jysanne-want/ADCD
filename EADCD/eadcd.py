@@ -21,26 +21,19 @@ class EADCD_Net(nn.Module):
         self.dim = dim
         self.emb_dropout = emb_dropout
 
-        # 1. 双流基础表征
         self.theta = nn.Embedding(self.n, 1)        # Gf
         self.delta = nn.Embedding(self.n, self.dim) # Gc
 
-        # 2. 双向映射
         self.generator = nn.Sequential(nn.Linear(1, self.dim // 2), nn.Tanh(), nn.Linear(self.dim // 2, self.dim))
         self.extractor = nn.Sequential(nn.Linear(self.dim, self.dim // 2), nn.Tanh(), nn.Linear(self.dim // 2, 1))
         self.belief_gate = nn.Sequential(nn.Linear(1, 16), nn.ReLU(), nn.Linear(16, 1), nn.Sigmoid())
 
-        # 3. [核心] 语义碰撞迁移模块 (替换了原来的 curve_params)
         self.gamma = nn.Embedding(self.k, self.dim) # vk
         
-        # A. 局部增长调制 (alpha_s)
         self.local_growth_mod = nn.Sequential(nn.Linear(1, 16), nn.Tanh(), nn.Linear(16, 1), nn.Softplus())
-        # B. 全局干扰交互 (Interference)
         self.interference_mlp = nn.Sequential(nn.Linear(self.dim, 32), nn.Tanh(), nn.Linear(32, 1))
-        # C. 智力调节 (beta_s)
         self.transfer_mod = nn.Sequential(nn.Linear(1, 16), nn.Tanh(), nn.Linear(16, 1), nn.Sigmoid())
 
-        # 4. 其他组件
         self.experience_encoder = nn.Linear(self.k, self.dim) 
         self.gain_gate = nn.Linear(self.dim * 2, self.dim)
         self.exer = nn.Embedding(self.m, self.dim)
@@ -49,7 +42,6 @@ class EADCD_Net(nn.Module):
         self.alpha = nn.Parameter(torch.zeros(1))
         self.beta = nn.Parameter(torch.zeros(1))
 
-        # 5. 预测网络
         self.prednet_input_len = self.k
         self.prednet_len1, self.prednet_len2 = 256, 128
         self.prednet_full1 = PosLinear(self.prednet_input_len, self.prednet_len1)
@@ -62,13 +54,12 @@ class EADCD_Net(nn.Module):
             if 'weight' in name: nn.init.xavier_normal_(param)
 
     def forward(self, s_id, e_id, q_vec, kc_counts):
-        # 1. 基础变量
+
         theta_raw = self.theta(s_id)
         u_raw = self.delta(s_id)
         total_counts = kc_counts.sum(dim=1, keepdim=True)
         log_total = torch.log(1.0 + total_counts)
 
-        # 2. 双流融合 + Dropout
         u_prior = self.generator(theta_raw)
         alpha = self.belief_gate(log_total)
         
@@ -80,22 +71,18 @@ class EADCD_Net(nn.Module):
             
         u_base = (1 - alpha_final) * u_prior + alpha_final * u_raw
 
-        # 3. 辅助损失
         theta_pred = self.extractor(u_raw.detach())
         loss_con = F.mse_loss(theta_pred, theta_raw, reduction='none')
         u_recon = self.generator(theta_pred)
         loss_rec = F.mse_loss(u_recon, u_raw.detach(), reduction='none')
         aux_loss = (alpha_final * (loss_con + loss_rec.mean(dim=1, keepdim=True))).mean()
 
-        # 4. [核心] 语义碰撞计算增益
         log_kc = torch.log(1.0 + kc_counts.float())
         gamma_k = self.gamma.weight
         
-        # a. 局部增长
         alpha_s = self.local_growth_mod(theta_raw)
         g_local = alpha_s * torch.tanh(log_kc)
         
-        # b. 全局背景与碰撞
         h_total = torch.matmul(log_kc, gamma_k) # (B, dim)
         h_self = log_kc.unsqueeze(-1) * gamma_k.unsqueeze(0) # (B, K, dim)
         h_bg = h_total.unsqueeze(1) - h_self # (B, K, dim)
@@ -106,13 +93,12 @@ class EADCD_Net(nn.Module):
         beta_s = self.transfer_mod(theta_raw)
         delta_gain = g_local + beta_s * raw_transfer
 
-        # 5. 融合与预测
         h_exp_vec = torch.tanh(self.experience_encoder(log_kc))
         g = torch.sigmoid(self.gain_gate(torch.cat([u_base, h_exp_vec], dim=1)))
         u_final = (1 - g) * u_base + g * h_exp_vec
         
         L_static = torch.matmul(u_final, gamma_k.T)
-        L_spec = L_static + delta_gain # 叠加动态增益
+        L_spec = L_static + delta_gain
         
         dk = torch.sigmoid(self.dk_projector(gamma_k)).squeeze(-1)
         L_base = self.alpha * theta_raw - dk * torch.exp(-self.beta * theta_raw)
